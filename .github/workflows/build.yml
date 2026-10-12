@@ -1,0 +1,130 @@
+name: build
+
+# Every push / PR builds all platforms and uploads them as workflow artifacts.
+# Pushing a tag like v1.2.0 also publishes a GitHub Release with the binaries.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
+          - os: macos-15-intel
+            name: macos-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      APP_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0' }}
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Set version
+        shell: bash
+        run: echo "APP_VERSION=${APP_VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: pyinstaller --noconfirm --clean pdfcombine.spec
+
+      # ---- Windows ----------------------------------------------------------
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir out
+          cp dist/PDFCombine.exe "out/PDFCombine-${APP_VERSION}-${{ matrix.name }}.exe"
+
+      # ---- macOS ------------------------------------------------------------
+      - name: Import signing certificate (macOS)
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 16)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          APP="dist/PDF Combine.app"
+          IDENTITY="Developer ID Application"
+          xattr -cr "$APP"
+          # sign nested code first, then the bundle itself
+          find "$APP/Contents" -type f \( -name "*.dylib" -o -name "*.so" -o -perm +111 \) -print0 |
+            while IFS= read -r -d '' f; do
+              if file "$f" | grep -q "Mach-O"; then
+                codesign --force --timestamp --options runtime --entitlements entitlements.plist --sign "$IDENTITY" "$f"
+              fi
+            done
+          codesign --force --timestamp --options runtime --entitlements entitlements.plist --sign "$IDENTITY" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ditto -c -k --keepParent "$APP" notarize.zip
+          xcrun notarytool submit notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m
+          xcrun stapler staple "$APP"
+          spctl --assess --type execute --verbose "$APP"
+
+      - name: Ad-hoc sign (macOS, no certificate configured)
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE == ''
+        run: |
+          xattr -cr "dist/PDF Combine.app"
+          codesign --force --deep --sign - "dist/PDF Combine.app"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir out
+          ditto -c -k --keepParent "dist/PDF Combine.app" "out/PDFCombine-${APP_VERSION}-${{ matrix.name }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFCombine-${{ matrix.name }}
+          path: out/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" out/* --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
