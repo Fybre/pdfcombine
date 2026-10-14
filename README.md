@@ -4,10 +4,16 @@ A small cross-platform (Windows / macOS) desktop tool for merging PDF files.
 
 - Drag PDFs (or folders of PDFs) into the left pane, or use **Add PDFs…**
 - Each file shows a first-page thumbnail and its page count
-- Select a file to preview all of its pages on the right
-- Reorder by dragging in the list, **▲ Up / ▼ Down**, or Ctrl+Up / Ctrl+Down
+- Reorder files by dragging in the list, **▲ Up / ▼ Down**, or Ctrl+Up / Ctrl+Down
 - **Remove** (or Delete key) / **Clear**
-- **Save Combined PDF…** (Ctrl/Cmd+S) writes the files in list order
+- Select a file to edit its pages in the grid on the right:
+  - drag thumbnails to reorder pages (a blue line shows where they will land)
+  - Delete / Backspace or **Delete Pages** removes the selected pages
+  - **Undo** (Ctrl/Cmd+Z) steps back through page edits; **Reset** restores the file's original pages
+  - the **Zoom** slider resizes thumbnails; double-click a page to view it full size
+  - labels show each page's original page number
+- **Save Combined PDF…** (Ctrl/Cmd+S) writes the files in list order, using each file's edited pages.
+  The source files are never modified.
 - Password-protected PDFs prompt for the password; the output is unencrypted
 
 Built with PySide6 (Qt, LGPL) and pypdfium2 (PDFium, Apache-2.0/BSD).
